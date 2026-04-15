@@ -1,13 +1,13 @@
 ---
 name: discord-mcp
 description: >
-  Build a Discord MCP Server for opencode that reads channels via REST API.
+  Build a Discord MCP Server for opencode with full Discord integration via REST API.
   Trigger: When the user wants to connect opencode to Discord, read Discord channels,
-  create a Discord integration, or build a custom MCP server for Discord.
+  send messages, manage forums, webhooks, reactions, or build a custom MCP server for Discord.
 license: Apache-2.0
 metadata:
   author: gentleman-programming
-  version: "2.0"
+  version: "3.0"
 ---
 
 ## Architecture
@@ -35,6 +35,7 @@ REST API mode reads everything the user can see. Bot mode requires `MANAGE_GUILD
 - User needs to monitor/search Discord messages without leaving the terminal
 - Building a community dashboard or analysis tool
 - Any project requiring Discord data in an AI workflow
+- Sending messages, managing forums, creating webhooks, or adding reactions via AI
 
 ## Project Structure
 
@@ -70,23 +71,30 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const TOKEN = process.env.DISCORD_USER_TOKEN;  // or DISCORD_BOT_TOKEN
+const TOKEN = process.env.DISCORD_USER_TOKEN || process.env.DISCORD_BOT_TOKEN;
 const API_BASE = "https://discord.com/api/v10";
 
-// Helper: call Discord API
-async function discordFetch(endpoint) {
-  const resp = await fetch(`${API_BASE}${endpoint}`, {
-    headers: {
-      Authorization: TOKEN,
-      "Content-Type": "application/json",
-    },
-  });
-  if (!resp.ok) throw new Error(`Discord API ${resp.status}: ${await resp.text()}`);
-  return resp.json();
+// Helper: call Discord API with retry
+async function discordFetch(endpoint, options = {}) {
+  const url = endpoint.startsWith("http") ? endpoint : `${API_BASE}${endpoint}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const resp = await fetch(url, {
+      headers: { Authorization: TOKEN, "Content-Type": "application/json" },
+      ...options,
+    });
+    if (resp.status === 429) {
+      const retryAfter = parseFloat(resp.headers.get("Retry-After") || "1");
+      await new Promise(r => setTimeout(r, retryAfter * 1000));
+      continue;
+    }
+    if (!resp.ok) throw new Error(`Discord API ${resp.status}: ${await resp.text()}`);
+    if (resp.status === 204) return null;
+    return resp.json();
+  }
 }
 
 // Define MCP server
-const server = new McpServer({ name: "discord-reader", version: "2.0.0" });
+const server = new McpServer({ name: "discord-mcp", version: "3.0.0" });
 
 // Register tools
 server.tool("tool_name", "description", { param: z.string() }, async ({ param }) => {
@@ -109,10 +117,13 @@ server.tool(
   "Description for the AI",       // Helps AI decide when to use it
   {                               // Zod schema for parameters
     channelId: z.string().describe("The channel ID"),
+    guildId: z.string().optional().describe("Guild ID (required for name resolution)"),
     limit: z.number().optional().default(50),
   },
-  async ({ channelId, limit }) => {  // Handler
-    const data = await discordFetch(`/channels/${channelId}/messages?limit=${limit}`);
+  async ({ channelId, guildId, limit }) => {  // Handler
+    const gId = guildId ? await resolveGuildId(guildId) : DEFAULT_GUILD;
+    const cId = await resolveChannelId(gId, channelId);
+    const data = await discordFetch(`/channels/${cId}/messages?limit=${limit}`);
     return {
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
     };
@@ -178,7 +189,10 @@ Token format: `MTQ5NDAx...` (longer, starts with MT).
       "type": "local",
       "command": ["node", "/path/to/discord-mcp/index.mjs"],
       "environment": {
-        "DISCORD_USER_TOKEN": "your_token_here"
+        "DISCORD_USER_TOKEN": "your_token_here",
+        "DISCORD_DEFAULT_GUILD_ID": "optional_default_guild",
+        "DISCORD_BANNED_GUILD_IDS": "optional,comma,separated,guild,ids",
+        "DISCORD_BANNED_USER_IDS": "optional,comma,separated,user,ids"
       }
     }
   }
@@ -187,34 +201,83 @@ Token format: `MTQ5NDAx...` (longer, starts with MT).
 
 For bot mode, use `DISCORD_BOT_TOKEN` instead.
 
-## 7 MCP Tools Available
+## 22 MCP Tools Available
+
+### Guilds & Server Info (2 tools)
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
 | `discord_list_guilds` | List all servers the user/bot has access to | (none) |
-| `discord_list_channels` | List all channels in a server | `guildId` |
-| `discord_read_channel` | Read messages from a channel | `channelId`, `limit`, `before`, `after` |
-| `discord_search_messages` | Search messages by text content | `channelId`, `query`, `limit` |
-| `discord_get_channel_info` | Get detailed channel metadata | `channelId` |
-| `discord_get_pinned` | Get pinned messages | `channelId` |
-| `discord_get_message` | Get a specific message by ID | `channelId`, `messageId` |
+| `discord_get_server_info` | Get detailed server info (roles, members, icon) | `guildId` |
+
+### Channels (4 tools)
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `discord_list_channels` | List all channels grouped by category | `guildId` |
+| `discord_get_channel_info` | Get detailed channel metadata | `channelId`, `guildId` |
+| `discord_create_channel` | Create a new text/voice/forum channel | `guildId`, `name`, `type`, `topic`, `parentId` |
+| `discord_delete_channel` | Delete a channel | `channelId`, `guildId`, `reason` |
+
+### Messages (6 tools)
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `discord_read_channel` | Read messages from a channel (paginated) | `channelId`, `guildId`, `limit`, `before`, `after` |
+| `discord_send_message` | Send a message to a channel | `channelId`, `guildId`, `message` |
+| `discord_delete_message` | Delete a specific message | `channelId`, `guildId`, `messageId`, `reason` |
+| `discord_search_messages` | Search messages by text (client-side filter) | `channelId`, `guildId`, `query`, `limit` |
+| `discord_get_message` | Get a specific message by ID | `channelId`, `guildId`, `messageId` |
+| `discord_get_pinned` | Get all pinned messages | `channelId`, `guildId` |
+
+### Forums (4 tools)
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `discord_list_forums` | List all forum channels with tags | `guildId` |
+| `discord_get_forum_post` | Read messages from a forum thread | `threadId`, `limit` |
+| `discord_create_forum_post` | Create a new forum post with tags | `forumChannelId`, `guildId`, `title`, `content`, `tags` |
+| `discord_reply_to_forum` | Reply to a forum thread | `threadId`, `message` |
+
+### Reactions (3 tools)
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `discord_add_reaction` | Add emoji reaction to message | `channelId`, `guildId`, `messageId`, `emoji` |
+| `discord_remove_reaction` | Remove your reaction from message | `channelId`, `guildId`, `messageId`, `emoji` |
+| `discord_add_multiple_reactions` | Add multiple emojis at once | `channelId`, `guildId`, `messageId`, `emojis` |
+
+### Webhooks (4 tools)
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `discord_create_webhook` | Create a webhook in a channel | `channelId`, `guildId`, `name` |
+| `discord_list_webhooks` | List webhooks in a channel | `channelId`, `guildId` |
+| `discord_send_webhook_message` | Send message via webhook (custom identity) | `webhookId`, `webhookToken`, `content`, `username`, `avatarUrl` |
+| `discord_delete_webhook` | Delete a webhook | `webhookId`, `webhookToken` |
 
 ## Discord API v10 Endpoints Used
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/users/@me/guilds` | GET | List user's servers |
-| `/guilds/{guildId}/channels` | GET | List channels in a server |
-| `/channels/{channelId}/messages` | GET | Read messages (max 100 per request) |
+| `/guilds/{guildId}` | GET | Get server details |
+| `/guilds/{guildId}/channels` | GET | List channels |
+| `/guilds/{guildId}/channels` | POST | Create channel |
+| `/channels/{channelId}` | GET/DELETE | Get info or delete channel |
+| `/channels/{channelId}/messages` | GET/POST | Read or send messages |
+| `/channels/{channelId}/messages/{messageId}` | GET/DELETE | Get or delete message |
 | `/channels/{channelId}/pins` | GET | Get pinned messages |
-| `/channels/{channelId}/messages/{messageId}` | GET | Get specific message |
-| `/channels/{channelId}` | GET | Get channel info |
+| `/channels/{channelId}/messages/{id}/reactions/{emoji}/@me` | PUT/DELETE | Add/remove reaction |
+| `/channels/{forumId}/threads` | POST | Create forum post |
+| `/channels/{channelId}/webhooks` | GET/POST | List or create webhooks |
+| `/webhooks/{id}/{token}` | POST/DELETE | Send or delete webhook |
 
 ## Rate Limits
 
 - Discord allows ~5 requests per second per route
 - The `discord_search_messages` tool includes 200ms delays between paginated requests
-- If you hit rate limits, implement exponential backoff with `Retry-After` header
+- v3.0 includes built-in rate limit retry: up to 3 attempts with `Retry-After` header backoff
 
 ## Key Learnings from Building This
 
@@ -225,6 +288,23 @@ For bot mode, use `DISCORD_BOT_TOKEN` instead.
 5. **Channel types** — Discord has 17+ channel types (TEXT=0, VOICE=2, CATEGORY=4, FORUM=15, etc.). Always filter by type when listing channels
 6. **Message pagination** — Discord returns messages newest-first. Use `before` parameter with the oldest message ID to paginate backwards
 7. **MCP stdio transport** — The server communicates via stdin/stdout JSON-RPC. Never `console.log()` to stdout — use `console.error()` for debug logs
+8. **Channel name resolution** — Users can pass `"general"` instead of `1198053804571111496`. The server caches guild/channel lookups for fast subsequent calls. Always requires `guildId` for name resolution.
+9. **Rate limit handling with retry** — Discord returns 429 with `Retry-After` header. The v3.0 server retries up to 3 times with exponential backoff built in.
+10. **Banned guilds/users** — Set `DISCORD_BANNED_GUILD_IDS` and `DISCORD_BANNED_USER_IDS` env vars (comma-separated) to block writes to specific servers or filter messages from specific users.
+11. **Error handling with solutions** — Each Discord error code maps to a human-readable solution (e.g., 40001 = "Token invalid or expired. Re-capture your Discord token.")
+12. **Forum posts are threads** — In Discord API, forum posts ARE threads. Use `/channels/{forumId}/threads` to create, then `/channels/{threadId}/messages` to read/reply.
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DISCORD_USER_TOKEN` | Yes* | User's Discord token (captured via Playwright) |
+| `DISCORD_BOT_TOKEN` | Yes* | Bot token (alternative to user token) |
+| `DISCORD_DEFAULT_GUILD_ID` | No | Default guild ID — lets you omit guildId from tools |
+| `DISCORD_BANNED_GUILD_IDS` | No | Comma-separated guild IDs to block write operations |
+| `DISCORD_BANNED_USER_IDS` | No | Comma-separated user IDs to filter from message reads |
+
+*One of DISCORD_USER_TOKEN or DISCORD_BOT_TOKEN is required.
 
 ## Commands
 
@@ -235,6 +315,7 @@ cd ~/.config/opencode/plugins/discord-mcp && npm init -y && npm install @modelco
 
 # Test the server starts without errors
 DISCORD_USER_TOKEN="your_token" timeout 5 node index.mjs
+# Should output: [discord-mcp] v3.0.0 started — 22 tools, REST API mode
 
 # Verify Discord API connectivity
 curl -H "Authorization: YOUR_TOKEN" https://discord.com/api/v10/users/@me
@@ -257,7 +338,9 @@ Requirements:
 - Single dependency: @modelcontextprotocol/sdk
 - Auth: [User Token / Bot Token]
 - Target server: [server name or ID]
-- Tools needed: [list which of the 7 tools you need]
+- Tools needed: [list which of the 22 tools you need]
+- Banned guilds: [optional: comma-separated guild IDs to block writes]
+- Banned users: [optional: comma-separated user IDs to filter from reads]
 - Install to: ~/.config/opencode/plugins/discord-mcp/
 Configure in opencode.json under mcp.discord.
 ```

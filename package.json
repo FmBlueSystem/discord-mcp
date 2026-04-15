@@ -1,14 +1,16 @@
 {
   "name": "discord-mcp",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "3.0.0",
+  "description": "Discord MCP Server for opencode — 22 tools, REST API mode, channel name resolution, forums, webhooks, reactions",
+  "main": "index.mjs",
+  "type": "module",
   "scripts": {
+    "start": "node index.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["discord", "mcp", "opencode", "ai", "model-context-protocol"],
+  "author": "FmBlueSystem",
+  "license": "Apache-2.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"
   }
